@@ -99,3 +99,5 @@ for fi in filenames:
 conn.commit()
 conn.execute("VACUUM")
 conn.close()
+
+print "SQLite version: %s" % sqlite3.sqlite_version
