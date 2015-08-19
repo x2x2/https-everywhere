@@ -421,10 +421,6 @@ const HTTPSRules = {
     var t2 =  new Date().getTime();
     this.log(NOTE,"Loading targets took " + (t2 - t1) / 1000.0 + " seconds");
 
-    var gitCommitQuery = rulesetDBConn.createStatement("select git_commit from git_commit");
-    if (gitCommitQuery.executeStep()) {
-      this.GITCommitID = gitCommitQuery.row.git_commit;
-    }
     return;
   },
 
@@ -476,8 +472,7 @@ const HTTPSRules = {
     }
   },
 
-
-  rewrittenURI: function(alist, input_uri) {
+  rewrittenURI: function(alist, input_uri, callback) {
     // This function oversees the task of working out if a uri should be
     // rewritten, what it should be rewritten to, and recordkeeping of which
     // applicable rulesets are and aren't active.  Previously this returned
@@ -491,44 +486,52 @@ const HTTPSRules = {
     if (!alist) this.log(DBUG, "No applicable list rewriting " + input_uri.spec);
     this.log(DBUG, "Processing " + input_uri.spec);
 
-    var uri = this.sanitiseURI(input_uri);
-
     // Get the list of rulesets that target this host
     try {
-      var rs = this.potentiallyApplicableRulesets(uri.host);
+      var host = input_uri.host
     } catch(e) {
-      this.log(NOTE, 'Could not check applicable rules for '+uri.spec + '\n'+e);
-      return null;
-    }
-
-    // ponder each potentially applicable ruleset, working out if it applies
-    // and recording it as active/inactive/moot/breaking in the applicable list
-    for (i = 0; i < rs.length; ++i) {
-      if (!rs[i].active) {
-        if (alist && rs[i].wouldMatch(uri, alist))
-          alist.inactive_rule(rs[i]);
-        continue;
-      } 
-      blob.newuri = rs[i].transformURI(uri);
-      if (blob.newuri) {
-        if (alist) {
-          if (uri.spec in https_everywhere_blacklist) 
-            alist.breaking_rule(rs[i]);
-          else 
-            alist.active_rule(rs[i]);
-  }
-        if (userpass_present) blob.newuri.userPass = input_uri.userPass;
-        blob.applied_ruleset = rs[i];
-        return blob;
+      // NS_ERROR_FAILURE is normal for accessing uri.host. It just means that
+      // host is not applicable for the URI scheme, e.g. about: URIs.
+      // If that happens we quietly return null. If another exception happens
+      // we noisily return null.
+      if (e.name != "NS_ERROR_FAILURE") {
+        this.log(WARN, 'Could not get host from ' + input_uri.spec + ': ' + e);
       }
-      if (uri.scheme == "https" && alist) {
-        // we didn't rewrite but the rule applies to this domain and the
-        // requests are going over https
-        if (rs[i].wouldMatch(uri, alist)) alist.moot_rule(rs[i]);
-        continue;
-      } 
+      callback(null);
+      return;
     }
-    return null;
+    var that = this;
+    this.potentiallyApplicableRulesets(host, function(rs) {
+      var uri = that.sanitiseURI(input_uri);
+      // ponder each potentially applicable ruleset, working out if it applies
+      // and recording it as active/inactive/moot/breaking in the applicable list
+      for (i = 0; i < rs.length; ++i) {
+        if (!rs[i].active) {
+          if (alist && rs[i].wouldMatch(uri, alist))
+            alist.inactive_rule(rs[i]);
+          continue;
+        }
+        blob.newuri = rs[i].transformURI(uri);
+        if (blob.newuri) {
+          if (alist) {
+            if (uri.spec in https_everywhere_blacklist) 
+              alist.breaking_rule(rs[i]);
+            else 
+              alist.active_rule(rs[i]);
+    }
+          if (userpass_present) blob.newuri.userPass = input_uri.userPass;
+          blob.applied_ruleset = rs[i];
+          callback(blob);
+        }
+        if (uri.scheme == "https" && alist) {
+          // we didn't rewrite but the rule applies to this domain and the
+          // requests are going over https
+          if (rs[i].wouldMatch(uri, alist)) alist.moot_rule(rs[i]);
+          continue;
+        } 
+      }
+      callback(null);
+    });
   },
 
   sanitiseURI: function(input_uri) {
@@ -599,25 +602,30 @@ const HTTPSRules = {
   },
 
   // Get all rulesets matching a given target, lazy-loading from DB as necessary.
-  rulesetsByTarget: function(target) {
-    var rulesetIds = this.targets[target];
-
+  rulesetsByTargets: function(targets, callback) {
     var output = [];
-    if (rulesetIds) {
-      this.log(INFO, "For target " + target + ", found ids " + rulesetIds.toString());
-      for (var i = 0; i < rulesetIds.length; i++) {
-        var id = rulesetIds[i];
-        if (!this.rulesetsByID[id]) {
-          this.loadRulesetById(id);
+    var foundIds = [];
+    var that = this;
+    targets.forEach(function(target) {
+      var rulesetIds = that.targets[target];
+
+      if (rulesetIds) {
+        for (var i = 0; i < rulesetIds.length; i++) {
+          var id = rulesetIds[i];
+          if (!that.rulesetsByID[id]) {
+            that.loadRulesetById(id);
+          }
+          if (that.rulesetsByID[id]) {
+            foundIds.push(id);
+            output.push(that.rulesetsByID[id]);
+          }
         }
-        if (this.rulesetsByID[id]) {
-          output.push(this.rulesetsByID[id]);
-        }
+      } else {
+        that.log(DBUG, "For target " + target + ", found no ids in DB");
       }
-    } else {
-      this.log(DBUG, "For target " + target + ", found no ids in DB");
-    }
-    return output;
+    });
+    that.log(DBUG, "For targets " + targets.join(' ') + ", found ids " + foundIds.join(','));
+    callback(output);
   },
 
   /**
@@ -628,15 +636,14 @@ const HTTPSRules = {
    * @param host {string}
    * @return {Array.<RuleSet>}
    */
-  potentiallyApplicableRulesets: function(host) {
+  potentiallyApplicableRulesets: function(host, callback) {
+    // XXX fix before submit: this should never happen.
+    if (!callback) {
+      this.log(WARN, 'Bad problem: potentiallyApplicableRulesets called without callback.');
+      return;
+    }
     var i, tmp, t;
-    var results = [];
-
-    var attempt = function(target) {
-      this.setInsert(results, this.rulesetsByTarget(target));
-    }.bind(this);
-
-    attempt(host);
+    var targetsToTry = [host];
 
     // replace each portion of the domain with a * in turn
     var segmented = host.split(".");
@@ -649,18 +656,22 @@ const HTTPSRules = {
       segmented[i] = "*";
       t = segmented.join(".");
       segmented[i] = tmp;
-      attempt(t);
+      targetsToTry.push(t);
     }
     // now eat away from the left, with *, so that for x.y.z.google.com we
     // check *.z.google.com and *.google.com (we did *.y.z.google.com above)
     for (i = 2; i <= segmented.length - 2; ++i) {
       t = "*." + segmented.slice(i,segmented.length).join(".");
-      attempt(t);
+      targetsToTry.push(t)
     }
-    this.log(DBUG,"Potentially applicable rules for " + host + ":");
-    for (i = 0; i < results.length; ++i)
-      this.log(DBUG, "  " + results[i].name);
-    return results;
+    var that = this;
+    this.rulesetsByTargets(targetsToTry, function(rulesets) {
+      that.log(DBUG,"Potentially applicable rules for " + host + ":");
+      for (i = 0; i < rulesets.length; ++i)
+        that.log(DBUG, "  " + rulesets[i].name);
+      callback(rulesets);
+    });
+    return;
   },
 
   /**
@@ -696,6 +707,8 @@ const HTTPSRules = {
     var i,j;
     // potentiallyApplicableRulesets is defined on hostnames not cookie-style
     // "domain" attributes, so we strip a leading dot before calling.
+    // XXX FIX FOR ASYNC
+    return;
     var rs = this.potentiallyApplicableRulesets(this.hostFromCookieDomain(c.host));
     for (i = 0; i < rs.length; ++i) {
       var ruleset = rs[i];
@@ -765,6 +778,8 @@ const HTTPSRules = {
     this.log(DBUG, "Testing securecookie applicability with " + test_uri);
     // potentiallyApplicableRulesets is defined on hostnames not cookie-style
     // "domain" attributes, so we strip a leading dot before calling.
+    // XXX FIX FOR ASYNC
+    return
     var rs = this.potentiallyApplicableRulesets(this.hostFromCookieDomain(domain));
     for (var i = 0; i < rs.length; ++i) {
       if (!rs[i].active) continue;

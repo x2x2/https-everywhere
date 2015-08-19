@@ -39,7 +39,26 @@ const HTTPS = {
    *   untouched or aborted.
    */
   replaceChannel: function(applicable_list, channel, httpNowhereEnabled) {
-    var blob = HTTPSRules.rewrittenURI(applicable_list, channel.URI.clone());
+    try {
+      channel.suspend();
+    } catch (e) {
+      this.log(WARN, 'Failed to suspend ' + channel.URI.spec + ': ' + e);
+      return;
+    }
+    this.log(WARN, 'Succeeded to suspend ' + channel.URI.spec);
+    var that = this;
+    HTTPSRules.rewrittenURI(applicable_list, channel.URI.clone(), function(blob) {
+      that.replaceChannelCallback(applicable_list, channel, httpNowhereEnabled, blob);
+    });
+  },
+
+  replaceChannelCallback: function(applicable_list, channel, httpNowhereEnabled, blob) {
+    try {
+      channel.resume();
+    } catch (e) {
+      this.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
+      return;
+    }
     var isSTS = securityService.isSecureURI(
         CI.nsISiteSecurityService.HEADER_HSTS, channel.URI, 0);
     if (blob === null) {
