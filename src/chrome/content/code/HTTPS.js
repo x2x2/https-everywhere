@@ -59,6 +59,7 @@ const HTTPS = {
       this.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
       return;
     }
+    this.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
     var isSTS = securityService.isSecureURI(
         CI.nsISiteSecurityService.HEADER_HSTS, channel.URI, 0);
     if (blob === null) {

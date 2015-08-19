@@ -655,6 +655,7 @@ HTTPSEverywhere.prototype = {
     // XXX: This causes NS_ERROR_UNAVAILABLE when replaceChannel tries to
     // suspend the channel.
     //HTTPS.replaceChannel(alist, newChannel, this.httpNowhereEnabled);
+    //
   },
 
   juggleApplicableListsDuringRedirection: function(oldChannel, newChannel) {

@@ -522,6 +522,7 @@ const HTTPSRules = {
           if (userpass_present) blob.newuri.userPass = input_uri.userPass;
           blob.applied_ruleset = rs[i];
           callback(blob);
+          return
         }
         if (uri.scheme == "https" && alist) {
           // we didn't rewrite but the rule applies to this domain and the
@@ -531,6 +532,7 @@ const HTTPSRules = {
         } 
       }
       callback(null);
+      return;
     });
   },
 
@@ -605,26 +607,25 @@ const HTTPSRules = {
   rulesetsByTargets: function(targets, callback) {
     var output = [];
     var foundIds = [];
+    var neededIds = [];
     var that = this;
     targets.forEach(function(target) {
-      var rulesetIds = that.targets[target];
-
-      if (rulesetIds) {
-        for (var i = 0; i < rulesetIds.length; i++) {
-          var id = rulesetIds[i];
-          if (!that.rulesetsByID[id]) {
-            that.loadRulesetById(id);
-          }
-          if (that.rulesetsByID[id]) {
-            foundIds.push(id);
-            output.push(that.rulesetsByID[id]);
-          }
+      var rulesetIds = that.targets[target] || [];
+      rulesetIds.forEach(function(id) {
+        foundIds.push(id);
+        if (!that.rulesetsByID[id]) {
+          neededIds.push(id);
+        } else {
+          output.push(that.rulesetsByID[id]);
         }
-      } else {
-        that.log(DBUG, "For target " + target + ", found no ids in DB");
-      }
+      });
     });
-    that.log(DBUG, "For targets " + targets.join(' ') + ", found ids " + foundIds.join(','));
+
+    neededIds.forEach(function(id) {
+      that.loadRulesetById(id);
+      output.push(that.rulesetsByID[id]);
+    });
+    that.log(WARN, "For targets " + targets.join(' ') + ", found ids " + foundIds.join(','));
     callback(output);
   },
 
