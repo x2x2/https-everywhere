@@ -470,6 +470,8 @@ const HTTPSRules = {
     }
   },
 
+  // return true iff callback has been called already, false if callback will be
+  // called asynchronously
   rewrittenURI: function(alist, input_uri, callback) {
     // This function oversees the task of working out if a uri should be
     // rewritten, what it should be rewritten to, and recordkeeping of which
@@ -496,10 +498,10 @@ const HTTPSRules = {
         this.log(WARN, 'Could not get host from ' + input_uri.spec + ': ' + e);
       }
       callback(null);
-      return;
+      return true;
     }
     var that = this;
-    this.potentiallyApplicableRulesets(host, function(rs) {
+    return this.potentiallyApplicableRulesets(host, function(rs) {
       var uri = that.sanitiseURI(input_uri);
       // ponder each potentially applicable ruleset, working out if it applies
       // and recording it as active/inactive/moot/breaking in the applicable list
@@ -595,7 +597,6 @@ const HTTPSRules = {
              row = aResultSet.getNextRow()) {
 
           let value = row.getResultByName("contents");
-          that.log(WARN, 'GOT VALUE ' + value);
           RuleWriter.readFromString(value, that, ruleset_id);
         }
       },
@@ -614,6 +615,7 @@ const HTTPSRules = {
   },
 
   // Get all rulesets matching a given target, lazy-loading from DB as necessary.
+  // Returns true if handled immediately: i.e., didn't have to go async.
   rulesetsByTargets: function(targets, callback) {
     var foundIds = [];
     var neededIds = [];
@@ -622,27 +624,34 @@ const HTTPSRules = {
       var rulesetIds = that.targets[target] || [];
       rulesetIds.forEach(function(id) {
         foundIds.push(id);
-  //      if (!that.rulesetsByID[id]) {
+        if (!that.rulesetsByID[id]) {
           neededIds.push(id);
-   //     }
+        }
       });
     });
 
     that.log(WARN, "For targets " + targets.join(' ') +
       ", found ids " + foundIds + ", need to load: " + neededIds);
 
-    function loadOne() {
+    var callbackImmediate = true;
+    function loadOne(done) {
       if (neededIds.length !== 0) {
-        that.loadRulesetById(neededIds.pop(), loadOne);
+        callbackImmediate = false;
+        that.loadRulesetById(neededIds.pop(), loadOne.bind(null, done));
       } else {
-        output = foundIds.map(function(id) {
-          return that.rulesetsByID[id];
-        })
-        that.log(WARN, "Returning from rulesetsByTargets " + output);
-        callback(output);
+        done();
       }
     }
-    loadOne();
+
+    loadOne(function() {
+      output = foundIds.map(function(id) {
+        return that.rulesetsByID[id];
+      })
+      that.log(WARN, "Callback from rulesetsByTargets output = " + output);
+      callback(output);
+    });
+    that.log(WARN, "Returning from rulesetsByTargets callbackImmediate = " + callbackImmediate);
+    return callbackImmediate;
   },
 
   /**
@@ -651,13 +660,13 @@ const HTTPSRules = {
    * This function is only defined for fully-qualified hostnames. Wildcards and
    * cookie-style domain attributes with a leading dot are not permitted.
    * @param host {string}
-   * @return {Array.<RuleSet>}
+   * @return true iff we didn't have to go async to load rules
    */
   potentiallyApplicableRulesets: function(host, callback) {
     // XXX fix before submit: this should never happen.
     if (!callback) {
       this.log(WARN, 'Bad problem: potentiallyApplicableRulesets called without callback.');
-      return;
+      return false;
     }
     var i, tmp, t;
     var targetsToTry = [host];
@@ -668,7 +677,7 @@ const HTTPSRules = {
       tmp = segmented[i];
       if (tmp.length === 0) {
         this.log(WARN,"Malformed host passed to potentiallyApplicableRulesets: " + host);
-        return null;
+        return false;
       }
       segmented[i] = "*";
       t = segmented.join(".");
@@ -682,13 +691,12 @@ const HTTPSRules = {
       targetsToTry.push(t)
     }
     var that = this;
-    this.rulesetsByTargets(targetsToTry, function(rulesets) {
+    return this.rulesetsByTargets(targetsToTry, function(rulesets) {
       that.log(DBUG,"Potentially applicable rules for " + host + ":");
       for (i = 0; i < rulesets.length; ++i)
         that.log(DBUG, "  " + rulesets[i].name);
       callback(rulesets);
     });
-    return;
   },
 
   /**

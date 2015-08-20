@@ -39,30 +39,53 @@ const HTTPS = {
    *   untouched or aborted.
    */
   replaceChannel: function(applicable_list, channel, httpNowhereEnabled) {
-    try {
-      channel.suspend();
-    } catch (e) {
-      this.log(WARN, 'Failed to suspend ' + channel.URI.spec + ': ' + e);
-      return;
-    }
-    this.log(WARN, 'Succeeded to suspend ' + channel.URI.spec);
     var that = this;
-    HTTPSRules.rewrittenURI(applicable_list, channel.URI.clone(), function(blob) {
-      that.replaceChannelCallback(applicable_list, channel, httpNowhereEnabled, blob);
+    // If the callback gets called immediately (not async), it will be called
+    // before the return from the function sets this variable, so we default it
+    // to true.
+    var callbackedImmediate = true;
+    callbackedImmediate = HTTPSRules.rewrittenURI(applicable_list, channel.URI.clone(), function(blob) {
+      if (callbackedImmediate) {
+        that.replaceChannelCallback(applicable_list, channel, httpNowhereEnabled, blob);
+      } else {
+        // If we can't redirect right away because we're waiting on some disk
+        // I/O to read the rules, we will have told the channel to redirect to
+        // itself and suspend, to insure it doesn't actually open while it's
+        // waiting for us to decide what to do. See
+        // https://bugzilla.mozilla.org/show_bug.cgi?id=1170197.
+        // Now that we're in the callback, we know the rules are loaded. So we
+        // tell the channel to go ahead and continue with the redirect-to-self.
+        // That will trigger on-modify-request again, and we'll wind up here
+        // again, except with the rules already loaded. We don't try a
+        // redirectTo here because it would fail with NS_ERROR_IN_PROGRESS.
+        try {
+          channel.resume();
+        } catch (e) {
+          that.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
+          return;
+        }
+        that.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
+      }
     });
-  },
-
-  replaceChannelCallback: function(applicable_list, channel, httpNowhereEnabled, blob) {
-    var that = this;
-    function resumeChannel() {
+    if (!callbackedImmediate) {
       try {
-        channel.resume();
+        channel.redirectTo(channel.URI);
       } catch (e) {
-        that.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
+        this.log(WARN, 'Failed to redirect to self ' + channel.URI.spec + ': ' + e);
         return;
       }
-      that.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
+      try {
+        channel.suspend();
+      } catch (e) {
+        this.log(WARN, 'Failed to suspend ' + channel.URI.spec + ': ' + e);
+        return;
+      }
+      this.log(WARN, 'Succeeded to suspend ' + channel.URI.spec);
     }
+  },
+
+  replaceChannelCallback: function(applicable_list, channel, httpNowhereEnabled, blob, callbackedImmediate) {
+    var that = this;
     var isSTS = securityService.isSecureURI(
         CI.nsISiteSecurityService.HEADER_HSTS, channel.URI, 0);
     if (blob === null) {
@@ -70,7 +93,6 @@ const HTTPS = {
       if (httpNowhereEnabled && channel.URI.schemeIs("http") && !isSTS) {
         IOUtil.abort(channel);
       }
-      resumeChannel();
       return false; // no rewrite
     }
     var uri = blob.newuri;
@@ -101,21 +123,18 @@ const HTTPS = {
       if (httpNowhereEnabled && channel.URI.schemeIs("http")) {
         IOUtil.abort(channel);
       }
-      resumeChannel();
       return false;
     }
 
     // Check for the new internal redirect API. If it exists, use it.
     if (!"redirectTo" in channel) {
       this.log(WARN, "nsIHTTPChannel.redirectTo API is missing. This version of HTTPS Everywhere is useless!!!!\n!!!\n");
-      resumeChannel();
       return false;
     }
 
     this.log(INFO, "Using nsIHttpChannel.redirectTo: " + channel.URI.spec + " -> " + uri.spec);
     try {
       channel.redirectTo(uri);
-      resumeChannel();
       return true;
     } catch(e) {
       // This should not happen. We should only get exceptions if
@@ -124,7 +143,6 @@ const HTTPS = {
     }
     this.log(WARN,"Aborting redirection " + channel.name + ", should be HTTPS!");
     IOUtil.abort(channel);
-    //resumeChannel();
     return false;
   },
 
