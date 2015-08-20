@@ -394,16 +394,14 @@ const HTTPSRules = {
 
       // Initialize database connection.
       var dbFile = new FileUtils.File(RuleWriter.chromeToPath("chrome://https-everywhere/content/rulesets.sqlite"));
-      var rulesetDBConn = Services.storage.openDatabase(dbFile);
-      this.queryForRuleset = rulesetDBConn.createStatement(
-        "select contents from rulesets where id = :id");
+      this.rulesetDBConn = Services.storage.openDatabase(dbFile);
 
       // Preload the mapping of hostname target -> ruleset ID from DB.
       // This is a little slow (287 ms on a Core2 Duo @ 2.2GHz with SSD),
       // but is faster than loading all of the rulesets. If this becomes a
       // bottleneck, change it to load in a background webworker, or load
       // a smaller bloom filter instead.
-      var targetsQuery = rulesetDBConn.createStatement("select host, ruleset_id from targets");
+      var targetsQuery = this.rulesetDBConn.createStatement("select host, ruleset_id from targets");
       this.log(DBUG, "Loading targets...");
       while (targetsQuery.executeStep()) {
         var host = targetsQuery.row.host;
@@ -585,27 +583,38 @@ const HTTPSRules = {
   },
 
   // Load a ruleset by numeric id, e.g. 234
-  // NOTE: This call runs synchronously, which can lock up the browser UI. Is
-  // there any way to fix that, given that we need to run blocking in the request
-  // flow? Perhaps we can preload all targets from the DB into memory at startup
-  // so we only hit the DB when we know there is something to be had.
-  loadRulesetById: function(ruleset_id) {
-    this.queryForRuleset.params.id = ruleset_id;
+  loadRulesetById: function(ruleset_id, callback) {
+    var query = this.rulesetDBConn.createStatement(
+      "select contents from rulesets where id = :id");
+    query.params.id = ruleset_id;
+    var that = this;
+    query.executeAsync({
+      handleResult: function(aResultSet) {
+        for (let row = aResultSet.getNextRow();
+             row;
+             row = aResultSet.getNextRow()) {
 
-    try {
-      if (this.queryForRuleset.executeStep()) {
-        RuleWriter.readFromString(this.queryForRuleset.row.contents, this, ruleset_id);
-      } else {
-        this.log(WARN,"Couldn't find ruleset for id " + ruleset_id);
+          let value = row.getResultByName("contents");
+          that.log(WARN, 'GOT VALUE ' + value);
+          RuleWriter.readFromString(value, that, ruleset_id);
+        }
+      },
+      handleError: function(aError) {
+        that.log(WARN, "SQLite error: " + aError.message);
+        callback();
+      },
+
+      handleCompletion: function(aReason) {
+        if (aReason != Components.interfaces.mozIStorageStatementCallback.REASON_FINISHED) {
+          that.log(WARN, "SQLite query canceled or aborted!");
+        }
+        callback();
       }
-    } finally {
-      this.queryForRuleset.reset();
-    }
+    });
   },
 
   // Get all rulesets matching a given target, lazy-loading from DB as necessary.
   rulesetsByTargets: function(targets, callback) {
-    var output = [];
     var foundIds = [];
     var neededIds = [];
     var that = this;
@@ -613,20 +622,27 @@ const HTTPSRules = {
       var rulesetIds = that.targets[target] || [];
       rulesetIds.forEach(function(id) {
         foundIds.push(id);
-        if (!that.rulesetsByID[id]) {
+  //      if (!that.rulesetsByID[id]) {
           neededIds.push(id);
-        } else {
-          output.push(that.rulesetsByID[id]);
-        }
+   //     }
       });
     });
 
-    neededIds.forEach(function(id) {
-      that.loadRulesetById(id);
-      output.push(that.rulesetsByID[id]);
-    });
-    that.log(WARN, "For targets " + targets.join(' ') + ", found ids " + foundIds.join(','));
-    callback(output);
+    that.log(WARN, "For targets " + targets.join(' ') +
+      ", found ids " + foundIds + ", need to load: " + neededIds);
+
+    function loadOne() {
+      if (neededIds.length !== 0) {
+        that.loadRulesetById(neededIds.pop(), loadOne);
+      } else {
+        output = foundIds.map(function(id) {
+          return that.rulesetsByID[id];
+        })
+        that.log(WARN, "Returning from rulesetsByTargets " + output);
+        callback(output);
+      }
+    }
+    loadOne();
   },
 
   /**

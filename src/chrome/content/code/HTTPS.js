@@ -53,13 +53,16 @@ const HTTPS = {
   },
 
   replaceChannelCallback: function(applicable_list, channel, httpNowhereEnabled, blob) {
-    try {
-      channel.resume();
-    } catch (e) {
-      this.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
-      return;
+    var that = this;
+    function resumeChannel() {
+      try {
+        channel.resume();
+      } catch (e) {
+        that.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
+        return;
+      }
+      that.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
     }
-    this.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
     var isSTS = securityService.isSecureURI(
         CI.nsISiteSecurityService.HEADER_HSTS, channel.URI, 0);
     if (blob === null) {
@@ -67,6 +70,7 @@ const HTTPS = {
       if (httpNowhereEnabled && channel.URI.schemeIs("http") && !isSTS) {
         IOUtil.abort(channel);
       }
+      resumeChannel();
       return false; // no rewrite
     }
     var uri = blob.newuri;
@@ -97,18 +101,21 @@ const HTTPS = {
       if (httpNowhereEnabled && channel.URI.schemeIs("http")) {
         IOUtil.abort(channel);
       }
+      resumeChannel();
       return false;
     }
 
     // Check for the new internal redirect API. If it exists, use it.
     if (!"redirectTo" in channel) {
       this.log(WARN, "nsIHTTPChannel.redirectTo API is missing. This version of HTTPS Everywhere is useless!!!!\n!!!\n");
+      resumeChannel();
       return false;
     }
 
     this.log(INFO, "Using nsIHttpChannel.redirectTo: " + channel.URI.spec + " -> " + uri.spec);
     try {
       channel.redirectTo(uri);
+      resumeChannel();
       return true;
     } catch(e) {
       // This should not happen. We should only get exceptions if
@@ -117,6 +124,7 @@ const HTTPS = {
     }
     this.log(WARN,"Aborting redirection " + channel.name + ", should be HTTPS!");
     IOUtil.abort(channel);
+    //resumeChannel();
     return false;
   },
 
