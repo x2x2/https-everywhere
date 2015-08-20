@@ -68,6 +68,10 @@ RuleSet.prototype = {
   ensureCompiled: function() {
     // Postpone compilation of exclusions, rules and cookies until now, to accelerate
     // browser load time.
+    // NOTE: Since rulesets are now lazy-loaded in FF, this will be called immediately
+    // after the ruleset is loaded, and doesn't give much startup benefit. We
+    // may want to switch these back so patterns are compiled immediately on
+    // ruleset load, for simplicity.
     if (this.compiled) return;
     var i;
 
@@ -615,7 +619,7 @@ const HTTPSRules = {
   },
 
   // Get all rulesets matching a given target, lazy-loading from DB as necessary.
-  // Returns true if handled immediately: i.e., didn't have to go async.
+  // Returns true if callback was called immediately: i.e., didn't have to go async.
   rulesetsByTargets: function(targets, callback) {
     var foundIds = [];
     var neededIds = [];
