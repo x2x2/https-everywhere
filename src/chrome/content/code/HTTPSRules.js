@@ -391,7 +391,8 @@ const HTTPSRules = {
                           // applicable ruleset ids
       this.rulesetsByID = {};
       this.rulesetsByName = {};
-      var t1 = new Date().getTime();
+      this.targetsLoaded = false;
+      this.targetsLoadingCallbacks = [];
       this.checkMixedContentHandling();
       var rulefiles = RuleWriter.enumerate(RuleWriter.getCustomRuleDir());
       this.scanRulefiles(rulefiles);
@@ -399,34 +400,75 @@ const HTTPSRules = {
       // Initialize database connection.
       var dbFile = new FileUtils.File(RuleWriter.chromeToPath("chrome://https-everywhere/content/rulesets.sqlite"));
       this.rulesetDBConn = Services.storage.openDatabase(dbFile);
-
-      this.loadTargets();
     } catch(e) {
       this.log(DBUG,"Rules Failed: "+e);
     }
-    var t2 =  new Date().getTime();
-    this.log(NOTE,"Loading targets took " + (t2 - t1) / 1000.0 + " seconds");
 
     return;
   },
 
-  loadTargets: function() {
-    // Preload the mapping of hostname target -> ruleset ID from DB.
+  loadTargets: function(callback) {
+    if (this.targetsLoaded) {
+      callback();
+      return;
+    }
+    // loadTargets can be called multiple times before it resolves. We store a
+    // list of callbacks to call when done, and make sure we only actually do
+    // the query once.
+    this.targetsLoadingCallbacks.push(callback);
+    if (this.targetsLoadingCallbacks.length > 1) {
+      this.log(DBUG, "Skipping loadTargets, a query is already in progress.");
+    }
+    // Load the mapping of hostname target -> ruleset ID from DB.
     // This is a little slow (287 ms on a Core2 Duo @ 2.2GHz with SSD),
     // but is faster than loading all of the rulesets. If this becomes a
     // bottleneck, change it to load in a background webworker, or load
     // a smaller bloom filter instead.
-    var targetsQuery = this.rulesetDBConn.createStatement("select host, ruleset_id from targets");
-    this.log(DBUG, "Loading targets...");
-    while (targetsQuery.executeStep()) {
-      var host = targetsQuery.row.host;
-      var id = targetsQuery.row.ruleset_id;
-      if (!this.targets[host]) {
-        this.targets[host] = [id];
-      } else {
-        this.targets[host].push(id);
+    var t1 = new Date().getTime();
+    var query = this.rulesetDBConn.createStatement("select host, ruleset_id from targets");
+    var that = this;
+    var count = 0;
+    this.log(INFO, "Querying targets");
+    // TODO: Store "this is pending" and resolve all pending once the whole
+    // thing is loaded.
+    query.executeAsync({
+      handleResult: function(aResultSet) {
+        try {
+        for (let row = aResultSet.getNextRow();
+             row;
+             row = aResultSet.getNextRow()) {
+          var host = row.getResultByName("host");
+          var id = row.getResultByName("ruleset_id");
+          count ++;
+          if (!that.targets[host]) {
+            that.targets[host] = [id];
+          } else {
+            that.targets[host].push(id);
+          }
+        }
+        } catch (e) {
+          that.log(WARN, "ERROR " + e);
+        }
+      },
+      handleError: function(aError) {
+        that.log(WARN, "SQLite error loading targets: " + aError.message);
+        callback();
+      },
+
+      handleCompletion: function(aReason) {
+        if (aReason != Components.interfaces.mozIStorageStatementCallback.REASON_FINISHED) {
+          that.log(WARN, "SQLite query canceled or aborted!");
+        } else {
+          var t2 =  new Date().getTime();
+          that.log(NOTE, "Loading " + count + " targets took " + (t2 - t1) / 1000.0 + " seconds");
+          that.targetsLoadingCallbacks.forEach(function(callback) {
+            callback();
+          });
+          that.targetsLoadingCallbacks = [];
+          that.targetsLoaded = true;
+        }
       }
-    }
+    });
   },
 
   checkMixedContentHandling: function() {
@@ -625,6 +667,15 @@ const HTTPSRules = {
   // Get all rulesets matching a given target, lazy-loading from DB as necessary.
   // Returns true if callback was called immediately: i.e., didn't have to go async.
   rulesetsByTargets: function(targets, callback) {
+    // If the array of target hosts is not already loaded, load it
+    // (asynchronously). This should only happen once.
+    if (!this.targetsLoaded) {
+      this.log(INFO, "Loading targets");
+      this.loadTargets(this.rulesetsByTargets.bind(this, targets, callback));
+      return false;
+    } else {
+      this.log(INFO, "Targets are loaded " + this.targets["www.eff.org"]);
+    }
     var foundIds = [];
     var neededIds = [];
     var that = this;
@@ -638,7 +689,7 @@ const HTTPSRules = {
       });
     });
 
-    that.log(WARN, "For targets " + targets.join(' ') +
+    this.log(DBUG, "For targets " + targets.join(' ') +
       ", found ids " + foundIds + ", need to load: " + neededIds);
 
     var callbackImmediate = true;
@@ -655,10 +706,10 @@ const HTTPSRules = {
       output = foundIds.map(function(id) {
         return that.rulesetsByID[id];
       })
-      that.log(WARN, "Callback from rulesetsByTargets output = " + output);
+      that.log(DBUG, "Callback from rulesetsByTargets output = " + output);
       callback(output);
     });
-    that.log(WARN, "Returning from rulesetsByTargets callbackImmediate = " + callbackImmediate);
+    that.log(DBUG, "Returning from rulesetsByTargets callbackImmediate = " + callbackImmediate);
     return callbackImmediate;
   },
 
@@ -671,7 +722,6 @@ const HTTPSRules = {
    * @return true iff we didn't have to go async to load rules
    */
   potentiallyApplicableRulesets: function(host, callback) {
-    // XXX fix before submit: this should never happen.
     if (!callback) {
       this.log(WARN, 'Bad problem: potentiallyApplicableRulesets called without callback.');
       return false;
@@ -748,9 +798,9 @@ const HTTPSRules = {
     // ruleset for the necessary host will have been loaded already for the HTTP
     // request.
     var result;
-    var callbackedImmediate = this.potentiallyApplicableRulesets(host, function() {
+    var callbackedImmediate = this.potentiallyApplicableRulesets(host, function(rs) {
       result = this.shouldSecureCookieWithRulesets(applicable_list, c, known_https, rs);
-    });
+    }.bind(this));
     if (callbackedImmediate) {
       return result;
     } else {

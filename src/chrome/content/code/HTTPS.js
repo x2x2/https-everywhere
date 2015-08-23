@@ -64,7 +64,7 @@ const HTTPS = {
           that.log(WARN, 'Failed to resume ' + channel.URI.spec + ': ' + e);
           return;
         }
-        that.log(WARN, 'Succeeded to resume ' + channel.URI.spec + ' ');
+        that.log(DBUG, 'Succeeded resuming ' + channel.URI.spec + ' ');
       }
     });
     if (!callbackedImmediate) {
@@ -80,7 +80,7 @@ const HTTPS = {
         this.log(WARN, 'Failed to suspend ' + channel.URI.spec + ': ' + e);
         return;
       }
-      this.log(WARN, 'Succeeded to suspend ' + channel.URI.spec);
+      this.log(DBUG, 'Succeeded suspending ' + channel.URI.spec);
     }
   },
 
