@@ -400,23 +400,7 @@ const HTTPSRules = {
       var dbFile = new FileUtils.File(RuleWriter.chromeToPath("chrome://https-everywhere/content/rulesets.sqlite"));
       this.rulesetDBConn = Services.storage.openDatabase(dbFile);
 
-      // Preload the mapping of hostname target -> ruleset ID from DB.
-      // This is a little slow (287 ms on a Core2 Duo @ 2.2GHz with SSD),
-      // but is faster than loading all of the rulesets. If this becomes a
-      // bottleneck, change it to load in a background webworker, or load
-      // a smaller bloom filter instead.
-      var targetsQuery = this.rulesetDBConn.createStatement("select host, ruleset_id from targets");
-      this.log(DBUG, "Loading targets...");
-      while (targetsQuery.executeStep()) {
-        var host = targetsQuery.row.host;
-        var id = targetsQuery.row.ruleset_id;
-        if (!this.targets[host]) {
-          this.targets[host] = [id];
-        } else {
-          this.targets[host].push(id);
-        }
-      }
-      this.log(DBUG, "Loading adding targets.");
+      this.loadTargets();
     } catch(e) {
       this.log(DBUG,"Rules Failed: "+e);
     }
@@ -424,6 +408,25 @@ const HTTPSRules = {
     this.log(NOTE,"Loading targets took " + (t2 - t1) / 1000.0 + " seconds");
 
     return;
+  },
+
+  loadTargets: function() {
+    // Preload the mapping of hostname target -> ruleset ID from DB.
+    // This is a little slow (287 ms on a Core2 Duo @ 2.2GHz with SSD),
+    // but is faster than loading all of the rulesets. If this becomes a
+    // bottleneck, change it to load in a background webworker, or load
+    // a smaller bloom filter instead.
+    var targetsQuery = this.rulesetDBConn.createStatement("select host, ruleset_id from targets");
+    this.log(DBUG, "Loading targets...");
+    while (targetsQuery.executeStep()) {
+      var host = targetsQuery.row.host;
+      var id = targetsQuery.row.ruleset_id;
+      if (!this.targets[host]) {
+        this.targets[host] = [id];
+      } else {
+        this.targets[host].push(id);
+      }
+    }
   },
 
   checkMixedContentHandling: function() {
@@ -518,11 +521,12 @@ const HTTPSRules = {
         blob.newuri = rs[i].transformURI(uri);
         if (blob.newuri) {
           if (alist) {
-            if (uri.spec in https_everywhere_blacklist) 
+            if (uri.spec in https_everywhere_blacklist) {
               alist.breaking_rule(rs[i]);
-            else 
+            } else {
               alist.active_rule(rs[i]);
-    }
+            }
+          }
           if (userpass_present) blob.newuri.userPass = input_uri.userPass;
           blob.applied_ruleset = rs[i];
           callback(blob);
@@ -533,7 +537,7 @@ const HTTPSRules = {
           // requests are going over https
           if (rs[i].wouldMatch(uri, alist)) alist.moot_rule(rs[i]);
           continue;
-        } 
+        }
       }
       callback(null);
       return;
@@ -736,15 +740,33 @@ const HTTPSRules = {
     var i,j;
     // potentiallyApplicableRulesets is defined on hostnames not cookie-style
     // "domain" attributes, so we strip a leading dot before calling.
-    // XXX FIX FOR ASYNC
-    return;
-    var rs = this.potentiallyApplicableRulesets(this.hostFromCookieDomain(c.host));
+    var host = this.hostFromCookieDomain(c.host);
+
+    // When checking for potentially applicable rulesets, we have to wait for a
+    // callback, because we may need to load the rulesets from disk. However, in
+    // practice this callback will always be run immediately, because the
+    // ruleset for the necessary host will have been loaded already for the HTTP
+    // request.
+    var result;
+    var callbackedImmediate = this.potentiallyApplicableRulesets(host, function() {
+      result = this.shouldSecureCookieWithRulesets(applicable_list, c, known_https, rs);
+    });
+    if (callbackedImmediate) {
+      return result;
+    } else {
+      this.log(WARN, "Shouldn't happen: rulesets were not already loaded for host " + host)
+      // Default to securing cookies if we aren't sure.
+      return true
+    }
+  },
+
+  shouldSecureCookieWithRulesets: function(applicable_list, c, known_https, rs) {
     for (i = 0; i < rs.length; ++i) {
       var ruleset = rs[i];
       if (ruleset.active) {
         ruleset.ensureCompiled();
         // Never secure a cookie if this page might be HTTP
-        if (!(known_https || this.safeToSecureCookie(c.rawHost))) {
+        if (!(known_https || this.safeToSecureCookie(c.rawHost, rs))) {
           continue;
         }
         for (j = 0; j < ruleset.cookierules.length; j++) {
@@ -784,9 +806,10 @@ const HTTPSRules = {
    * flagged as secure.
    *
    * @param domain {string} The cookie's 'domain' attribute.
+   * @param rs {Array.<Ruleset>} A list of potentially applicable rulesets.
    * @return {boolean} True if it's safe to secure a cookie on that domain.
    */
-  safeToSecureCookie: function(domain) {
+  safeToSecureCookie: function(domain, rs) {
     if (domain in https_blacklist_domains) {
       this.log(INFO, "cookies for " + domain + "blacklisted");
       return false;
@@ -805,11 +828,7 @@ const HTTPSRules = {
     }
 
     this.log(DBUG, "Testing securecookie applicability with " + test_uri);
-    // potentiallyApplicableRulesets is defined on hostnames not cookie-style
-    // "domain" attributes, so we strip a leading dot before calling.
-    // XXX FIX FOR ASYNC
-    return
-    var rs = this.potentiallyApplicableRulesets(this.hostFromCookieDomain(domain));
+
     for (var i = 0; i < rs.length; ++i) {
       if (!rs[i].active) continue;
       var rewrite = rs[i].apply(test_uri);
