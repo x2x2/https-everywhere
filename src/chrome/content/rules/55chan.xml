@@ -5,9 +5,9 @@
 	not same content as http version
 
 -->
-<ruleset name="RabbitMQ">
-	<target host="rabbitmq.com" />
-	<target host="www.rabbitmq.com" />
+<ruleset name="55chan">
+	<target host="55chan.org" />
+	<target host="55chan.org" />
 
 	<rule from="^http:"
 		to="https:" />
